@@ -67,6 +67,19 @@ def pearson_correlation(y_pred, y):
     r_val = r_num / r_den
     return r_val
 
+def confusion_matrix(y, y_pred, labels):
+    return sk_metrics.confusion_matrix(y, y_pred, labels=labels, normalize='pred')
+
+def balanced_accuracy(y, y_pred):
+    return sk_metrics.balanced_accuracy_score(y, y_pred)
+
+def accuracy_score(y, y_pred):
+    return sk_metrics.accuracy_score(y, y_pred)
+
+def AUC(y, y_pred, multi_class=None) :
+    if multi_class is not None :
+        return sk_metrics.roc_auc_score(y, y_pred, multi_class=multi_class, average='macro')
+    return sk_metrics.roc_auc_score(y, y_pred)
 
 class BinaryClassificationMetrics(object):
     """ Computes and stores the average and current value.
@@ -110,7 +123,7 @@ class BinaryClassificationMetrics(object):
 
 
 class SKMetrics(object):
-    """ Wraping arounf scikit-learn metrics.
+    """ Wraping aroudf scikit-learn metrics.
     """
     def __init__(self, name, thr=0.5, with_logit=True, **kwargs):
         self.name = name

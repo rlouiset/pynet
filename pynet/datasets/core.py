@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 ##########################################################################
-# NSAp - Copyright (C) CEA, 2019 - 2020
+# NSAp - Copyright (C) CEA, 2019
 # Distributed under the terms of the CeCILL-B license, as published by
 # the CEA-CNRS-INRIA. Refer to the LICENSE file or to
 # http://www.cecill.info/licences/Licence_CeCILL-B_V1-en.html
@@ -12,347 +12,349 @@ Module that provides core functions to load and split a dataset.
 """
 
 # Imports
-from collections import namedtuple, OrderedDict, Counter
-import progressbar
-import random
-import logging
-import numpy as np
-import pandas as pd
+from collections import namedtuple, OrderedDict
 import torch
-from torch.utils.data import (
-    Dataset, DataLoader, WeightedRandomSampler, RandomSampler)
+import logging
+import bisect
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, RandomSampler, ConcatDataset
+import numpy as np
+from tqdm import tqdm
+import pandas as pd
 from sklearn.model_selection import (
     KFold, StratifiedKFold, ShuffleSplit, StratifiedShuffleSplit)
-from skimage.util.shape import view_as_blocks
-
+from sklearn.preprocessing import KBinsDiscretizer
 # Global parameters
 SetItem = namedtuple("SetItem", ["test", "train", "validation"])
 DataItem = namedtuple("DataItem", ["inputs", "outputs", "labels"])
-logger = logging.getLogger("pynet")
 
+
+class ListTensors:
+    def __init__(self, *tensor_list):
+        self.list_tensors = list(tensor_list)
+
+    def __getitem__(self, item):
+        return self.list_tensors[item]
+
+    def to(self, device, **kwargs):
+        for i, e in enumerate(self.list_tensors):
+            self.list_tensors[i] = e.to(device, **kwargs)
+        return self.list_tensors
 
 class DataManager(object):
     """ Data manager used to split a dataset in train, test and validation
     pytorch datasets.
     """
-    def __init__(self, input_path, metadata_path, output_path=None,
-                 labels=None, stratify_label=None, custom_stratification=None,
-                 projection_labels=None, number_of_folds=10, batch_size=1,
-                 sampler="random", input_transforms=None,
-                 output_transforms=None, data_augmentation_transforms=None,
-                 add_input=False, test_size=0.1, label_mapping=None,
-                 patch_size=None, continuous_labels=False, sample_size=1,
+
+    def __init__(self, input_path, metadata_path, output_path=None, add_to_input=None,
+                 labels=None, stratify_label=None, categorical_strat_label=True, custom_stratification=None,
+                 N_train_max=None,  projection_labels=None, number_of_folds=10, batch_size=1, sampler=None,
+                 in_features_transforms=None, input_transforms=None, output_transforms=None, labels_transforms=None,
+                 stratify_label_transforms=None, data_augmentation=None, self_supervision=None, add_input=False,
+                 patch_size=None, input_size=None, test_size=0.1, dataset=None, device='cpu', sep=',', N_train_max_per_label=None,
                  **dataloader_kwargs):
         """ Splits an input numpy array using memory-mapping into three sets:
         test, train and validation. This function can stratify the data.
 
-        The train/test indices are performed using a Stratified or not
-        ShuffleSplit.
-
-        TODO: In the case of custom stratification, enable the weighted random
-        sampler.
+        TODO: add how validation split is perform.
+        TODO: fix case number_of_folds=1
 
         Parameters
         ----------
-        input_path: str
+        input_path: str or list[str]
             the path to the numpy array containing the input tensor data
-            that will be splited/loaded or the dataset itself.
-        metadata_path: str
+            that will be splited/loaded.
+        metadata_path: str or list[str]
             the path to the metadata table in tsv format.
-        output_path: str, default None
+        output_path: str or list[str], default None
             the path to the numpy array containing the output tensor data
             that will be splited/loaded.
+        add_to_input: list of str, default None
+            list of features to add to the input
         labels: list of str, default None
             in case of classification/regression, the name of the column(s)
             in the metadata table to be predicted.
-        projection_labels: dict, default None
-            selects only the data that match the conditions. Use this
-            dictionary to filter the input data from the metadata table:
-            {<column_name>: <value>}.
         stratify_label: str, default None
             the name of the column in the metadata table containing the label
-            used during the stratification (mutuallty exclusive with
-            'custom_stratification').
+            used during the stratification.
+        categorical_strat_label: bool, default True
+            is the stratification label a categorical or continuous variable ?
         custom_stratification: dict, default None
-            split the dataset into train/validation/test according to the
-            defined stratification strategy. The filtering is performed
-            as for the labels projection (mutuallty exclusive with
-            'stratify_label').
+            same format as projection labels. It will split the dataset into train/test/val according
+            to the stratification defined in the dict.
+        N_train_max: int, default None
+            set the max number of training samples that can be put in the training set. The stratification is made
+            accordingly
+        projection_labels: dict, default None
+            selects only the data that match the conditions in the dict
+            {<column_name>: <value>}.
         number_of_folds: int, default 10
             the number of folds that will be used in the cross validation.
         batch_size: int, default 1
             the size of each mini-batch.
-        sampler: str, default 'random'
-            whether we use a random or weighted random sampler (to deal with
-            imbalanced classes issue) during the generation of the
-            mini-batches: None, 'random', or 'weighted_random'.
+        sampler: str in ["random", "weighted_random"], default None
+            Whether we use a weighted random sampler (to deal with imbalanced classes issue) or random sampler (without
+            replacement, to introduce shuffling in batches)
         input_transforms, output_transforms: list of callable, default None
             transforms a list of samples with pre-defined transformations.
-        data_augmentation_transforms: list of callable, default None
-            transforms the training dataset input with pre-defined
-            transformations on the fly during the training.
+        data_augmentation: list of callable, default None
+            transforms the training dataset input with pre-defined transformations on the fly during the training.
+        self_supervision: a callable, default None
+            applies a transformation to each input and generates a label
         add_input: bool, default False
             if true concatenate the input tensor to the output tensor.
         test_size: float, default 0.1
             should be between 0.0 and 1.0 and represent the proportion of the
             dataset to include in the test split.
-        label_mapping: dict, default None
-            a mapping that can be used to convert labels to be predicted
-            (string to int conversion).
-        patch_size: tuple, default None
-            the size of the patches that will be extracted from the
-            input/output images.
-        continuous_labels: bool, default False
-            if set consider labels as continuous values; ie. floats otherwise
-            a discrete values, ie. integer.
-        sample_size: float, default 1
-            should be between 0.0 and 1.0 and represent the proportion of the
-            dataset used by the manger (random selection that can be usefull
-            during testing.
+        dataset: Dataset object, default None
+            The Dataset used to create the DataLoader. It must be a subclass of <ArrayDataset>
         """
-        # Checks
-        if stratify_label is not None and custom_stratification is not None:
-            raise ValueError("You specified two stratification strategies.")
-        if sampler not in (None, "random", "weighted_random"):
-            raise ValueError("Unsupported sampler.")
-        if sampler == "weighted_random" and stratify_label is None:
-            raise ValueError(
-                "Impossible to use the weighted sampler without a "
-                "stratification label.")
-
-        # Class parameters
-        # We should only work with masked data but we want to preserve the
-        # memory mapping so we are getting the right index at the end
-        # (in __getitem__ of ArrayDataset)
-        self.batch_size = batch_size
-        self.number_of_folds = number_of_folds
-        self.data_loader_kwargs = dataloader_kwargs
-        self.sampler = sampler
-        self.continuous_labels = continuous_labels
-        if isinstance(input_path, dict):
-            self.dataset = input_path
-            return
-        df = pd.read_csv(metadata_path, sep="\t")
-        logger.debug("Metadata:\n{0}".format(df))
-        mask = DataManager.get_mask(
-            df=df, projection_labels=projection_labels,
-            sample_size=sample_size)
-        mask_indices = DataManager.get_mask_indices(mask)
-        logger.debug("Projection labels: {0}".format(projection_labels))
-        logger.debug("Mask: {0}".format(mask))
-        logger.debug("Mask indices: {0}".format(mask_indices))
-        self.inputs = np.load(input_path, mmap_mode='r')
-        logger.debug("Inputs: {0}".format(self.inputs.shape))
-        self.outputs, self.labels = (None, None)
+        assert input_path is None or type(input_path) == type(metadata_path)
         if output_path is not None:
-            self.outputs = np.load(output_path, mmap_mode='r')
-            logger.debug("Outputs: {0}".format(self.outputs.shape))
+            assert input_path is None or type(output_path) == type(input_path)
+
+        input_path = [input_path] if type(input_path) == str else input_path
+        metadata_path = [metadata_path] if type(metadata_path) == str else metadata_path
+        output_path = [output_path] if output_path is not None else None
+
+        assert input_path is None or len(input_path) == len(metadata_path)
+        self.logger = logging.getLogger("pynet")
+
+        if input_path is not None:
+            for (i, m) in zip(input_path, metadata_path):
+                self.logger.info('Correspondance {data} <==> {meta}'.format(data=i, meta=m))
+
+            self.inputs = [np.load(p, mmap_mode='r') for p in input_path]
+        else:
+            self.inputs = None
+
+        if output_path is not None:
+            self.outputs = [np.load(p, mmap_mode='r') for p in output_path]
+
+        all_df = [pd.read_csv(p, sep=sep) for p in metadata_path]
+        assert self.inputs is None or np.all([len(i) == len(m) for (i,m) in zip(self.inputs, all_df)])
+
+        df = pd.concat(all_df, ignore_index=True, sort=False)
+
+        mask = DataManager.get_mask(
+            df=df,
+            projection_labels=projection_labels,
+            check_nan=labels)
+
+        mask_indices = DataManager.get_indices_from_mask(mask)
+
+        # We should only work with masked data but we want to preserve the memory mapping so we are getting the right
+        # index at the end (in __getitem__ of ArrayDataset)
+
+        self.outputs, self.labels, self.stratify_label, self.features_to_add = (None, None, None, None)
+
         if labels is not None:
-            self.labels = df[labels].values.squeeze()
-            logger.debug("Labels: {0}".format(self.labels.shape))
-            assert len(self.labels) == len(self.inputs)
-        self.metadata = df
-        self.mask = mask
-        self.test_size = test_size
+            if self_supervision is not None:
+                raise ValueError("Impossible to set a label if self_supervision is on.")
+            assert np.all(~df[labels][mask].isna())
+            self.labels = df[labels].values.copy()
+            self.labels = self.labels.squeeze()
+
+        if stratify_label is not None:
+            self.stratify_label = df[stratify_label].values.copy()
+            # Apply the labels transform here as a mapping to the integer representation of the classes
+            for i in mask_indices:
+                label = self.stratify_label[i]
+                for tf in (stratify_label_transforms or []):
+                    label = tf(label)
+                self.stratify_label[i] = label
+            init_stratify_label_copy = self.stratify_label.copy()
+            # If necessary, discretizes the labels
+            if not categorical_strat_label:
+                self.stratify_label[mask] = DataManager.discretize_continous_label(self.stratify_label[mask],
+                                                                                   verbose=True)
+
+        if add_to_input is not None:
+            self.features_to_add = np.array([df[f].values for f in add_to_input]).transpose()
+
+        self.metadata_path = metadata_path
+        self.projection_labels = projection_labels
+        self.number_of_folds = number_of_folds
+        self.batch_size = batch_size
         self.input_transforms = input_transforms or []
         self.output_transforms = output_transforms or []
-        self.data_augmentation_transforms = data_augmentation_transforms or []
+        self.labels_transforms = labels_transforms or []
+        self.data_augmentation = data_augmentation or []
+        self.self_supervision = self_supervision
         self.add_input = add_input
-        self.dataset = dict(
-            (key, []) for key in ("train", "test", "validation"))
+        self.data_loader_kwargs = dataloader_kwargs
+        assert sampler in [None, "weighted_random", "random"], "Unknown sampler: %s" % str(sampler)
+        self.sampler = sampler
 
-        # Split into train+validation/test: get only indices.
+        dataset_cls = ArrayDataset if dataset is None else dataset
+        assert issubclass(dataset_cls, ArrayDataset)
+
+
+        if self.sampler == "weighted_random":
+            if self.stratify_label is None:
+                raise ValueError('Impossible to use the WeightedRandomSampler if no stratify label is available.')
+            class_samples_count = [0 for _ in range(len(set(self.stratify_label[mask])))] # len == nb of classes
+            for label in self.stratify_label[mask]:
+                class_samples_count[label] += 1
+            # Imbalanced weights in case of imbalanced classes issue
+            self.sampler_weigths = 1. / torch.tensor(class_samples_count, dtype=torch.float)
+
+        self.dataset = dict((key, [])
+                            for key in ("train", "test", "validation"))
+
+        if N_train_max is not None:
+            assert custom_stratification is not None and \
+                   {"train", "test"} <= set(custom_stratification.keys())
+
+        # 1st step: split into train/test (get only indices)
+        dummy_like_X_masked = np.ones(np.sum(mask))
         val_indices, train_indices, test_indices = (None, None, None)
-        (self.stratify_labels, self.stratify_categories,
-         self.sampler_weights) = (None, None, None)
-        if stratify_label is not None:
-            self.stratify_labels = df[stratify_label].values
-            self.stratify_categories = set(self.stratify_labels[mask])
-            self.sampler_weights = Counter(self.stratify_labels[mask])
-        if self.test_size == 0:
-            train_indices = mask_indices
-            test_indices = None
+        if custom_stratification is not None:
+            if "validation" in custom_stratification and stratify_label is not None and N_train_max is None:
+                print("Warning: impossible to stratify the data: validation+test set already defined ! ")
+            train_mask, test_mask = (DataManager.get_mask(df, custom_stratification["train"]),
+                                     DataManager.get_mask(df, custom_stratification["test"]))
+            if "validation" in custom_stratification:
+                val_mask = DataManager.get_mask(df, custom_stratification["validation"])
+                val_mask &= mask
+                val_indices = DataManager.get_indices_from_mask(val_mask)
+                if N_train_max is None:
+                    self.number_of_folds = 1
+
+            train_mask &= mask
+            test_mask &= mask
+            train_indices = DataManager.get_indices_from_mask(train_mask)
+            test_indices = DataManager.get_indices_from_mask(test_mask)
+
+        elif stratify_label is not None:
+            splitter = StratifiedShuffleSplit(
+                n_splits=1, random_state=0, test_size=test_size)
+            train_indices, test_indices = next(
+                splitter.split(dummy_like_X_masked, self.stratify_label[mask]))
+            train_indices = mask_indices[train_indices]
+            test_indices = mask_indices[test_indices]
         else:
-            dummy_mask_like = np.ones(np.sum(mask))
-            if custom_stratification is not None:
-                for key in ("train", "test"):
-                    if key not in custom_stratification:
-                        raise ValueError("Unformed custom straitification.")
-                train_mask = DataManager.get_mask(
-                    df, custom_stratification["train"])
-                test_mask = DataManager.get_mask(
-                    df, custom_stratification["test"])
-                train_mask &= mask
-                test_mask &= mask
-                train_indices = DataManager.get_mask_indices(train_mask)
-                test_indices = DataManager.get_mask_indices(test_mask)
-                if "validation" in custom_stratification:
-                    val_mask = DataManager.get_mask(
-                        df, custom_stratification["validation"])
-                    val_mask &= mask
-                    val_indices = DataManager.get_mask_indices(val_indices)
-            elif stratify_label is not None:
-                splitter = StratifiedShuffleSplit(
-                    n_splits=1, random_state=0, test_size=self.test_size)
-                train_mask, test_mask = next(splitter.split(
-                    dummy_mask_like, self.stratify_labels[mask]))
-                train_indices = mask_indices[train_mask]
-                test_indices = mask_indices[test_mask]
+            if test_size == 1:
+                train_indices, test_indices = (None, mask_indices)
             else:
-                if test_size == 1:
-                    train_indices, test_indices = (None, mask_indices)
-                else:
-                    splitter = ShuffleSplit(
-                        n_splits=1, random_state=0, test_size=test_size)
-                    train_indices, test_indices = next(splitter.split(
-                        dummy_mask_like))
-                    train_indices = mask_indices[train_indices]
-                    test_indices = mask_indices[test_indices]
-        logger.debug("Train+Validation indices: {0}-{1}".format(
-            len(train_indices) if train_indices is not None else None,
-            train_indices))
-        logger.debug("Test indices: {0}-{1}".format(
-            len(test_indices) if test_indices is not None else None,
-            test_indices))
-        if test_indices is None:
-            self.dataset["test"] = None
-        else:
-            self.dataset["test"] = ArrayDataset(
-                self.inputs, test_indices, labels=self.labels,
-                outputs=self.outputs, add_input=self.add_input,
-                input_transforms=self.input_transforms,
-                output_transforms=self.output_transforms,
-                label_mapping=label_mapping,
-                patch_size=patch_size)
+                splitter = ShuffleSplit(
+                    n_splits=1, random_state=0, test_size=test_size)
+                train_indices, test_indices = next(splitter.split(dummy_like_X_masked))
+                train_indices = mask_indices[train_indices]
+                test_indices = mask_indices[test_indices]
+
         if train_indices is None:
             return
 
-        # Split the training set into K folds (K-1 for training, 1 for
-        # validation, K times)
-        dummy_train_like = np.ones(len(train_indices))
-        if val_indices is not None:
-            self.generator = [(train_indices, val_indices)]
-        elif stratify_label is not None:
-            kfold_splitter = StratifiedKFold(
-                n_splits=self.number_of_folds)
-            self.generator = kfold_splitter.split(
-                dummy_train_like, self.stratify_labels[train_indices])
-            self.generator = [(train_indices[train], train_indices[val])
-                              for (train, val) in self.generator]
+        assert len(set(train_indices) & set(test_indices)) == 0, 'Test set must be independent from train set'
+
+        self.dataset["test"] = dataset_cls(
+            self.inputs, test_indices, labels=self.labels,
+            features_to_add=self.features_to_add,
+            outputs=self.outputs, add_input=self.add_input,
+            in_features_transforms=in_features_transforms,
+            input_transforms = self.input_transforms,
+            output_transforms = self.output_transforms,
+            label_transforms = self.labels_transforms,
+            self_supervision=self.self_supervision,
+            patch_size=patch_size, input_size=input_size,
+            concat_datasets=(self.inputs is not None),
+            device=device)
+
+        # 2nd step: split the training set into K folds (K-1 for training, 1
+        # for validation, K times)
+
+        if stratify_label is not None and not categorical_strat_label:
+            # Recomputes the discretization for the training set to get a split train/val with finer statistics
+            # (we do not assume that train+test has the same stats as train in case of custom stratification).
+            self.stratify_label[train_indices] = \
+                DataManager.discretize_continous_label(init_stratify_label_copy[train_indices], verbose=True)
+
+        dummy_like_X_train = np.ones(len(train_indices))
+
+        if N_train_max is not None:
+            Splitter = ShuffleSplit if stratify_label is None else StratifiedShuffleSplit
+            kfold_splitter = Splitter(n_splits=self.number_of_folds,
+                                      train_size=float(0.92*N_train_max/len(train_indices)), random_state=0)
+            strat_indices = np.array(self.stratify_label[train_indices], dtype=np.int32) \
+                if stratify_label is not None else None
+            gen = kfold_splitter.split(dummy_like_X_train, strat_indices)
+            if val_indices is not None:
+                gen = [(train_indices[tr], val_indices) for (tr, _) in gen]
+            else:
+                gen = [(train_indices[tr], train_indices[val]) for (tr, val) in gen]
+        elif val_indices is not None:
+            gen = [(train_indices, val_indices)]
         else:
-            kfold_splitter = KFold(n_splits=self.number_of_folds)
-            self.generator = kfold_splitter.split(dummy_train_like)
-            self.generator = [(train_indices[train], train_indices[val])
-                              for (train, val) in self.generator]
-        for fold_train_indices, fold_val_indices in self.generator:
-            logger.debug("Fold train indices: {0}".format(fold_train_indices))
-            logger.debug("Fold val indices: {0}".format(fold_val_indices))
-            assert len(set(fold_val_indices) & set(fold_train_indices)) == 0
-            assert (len(set(fold_val_indices)) + len(set(fold_train_indices))
-                    == len(set(train_indices)))
-            train_dataset = ArrayDataset(
-                self.inputs, fold_train_indices, labels=self.labels,
-                outputs=self.outputs, add_input=self.add_input,
-                input_transforms=(self.input_transforms +
-                                  self.data_augmentation_transforms),
-                output_transforms=(self.output_transforms +
-                                   self.data_augmentation_transforms),
-                label_mapping=label_mapping,
-                patch_size=patch_size)
-            val_dataset = ArrayDataset(
-                self.inputs, fold_val_indices, labels=self.labels,
-                outputs=self.outputs, add_input=self.add_input,
+            if self.number_of_folds > 1:
+                Splitter = KFold if stratify_label is None else StratifiedKFold
+                kfold_splitter = Splitter(n_splits=self.number_of_folds)
+                strat_indices = np.array(self.stratify_label[train_indices], dtype=np.int32) \
+                    if stratify_label is not None else None
+                gen = kfold_splitter.split(dummy_like_X_train, strat_indices)
+                gen = [(train_indices[tr], train_indices[val]) for (tr, val) in gen]
+            else:
+                gen = [(train_indices, [])]
+
+        for fold_train_index, fold_val_index in gen:
+            if N_train_max_per_label is not None:
+                fold_train_label = self.get_labels(df, labels, fold_train_index)
+                for label in np.unique(fold_train_label):
+                    label_count = np.sum(fold_train_label == label)
+                    while label_count > N_train_max_per_label:
+                        idx_to_del = np.argwhere(
+                            fold_train_index == np.random.choice(fold_train_index[fold_train_label == label]))
+                        fold_train_index = np.delete(fold_train_index, idx_to_del)
+                        fold_train_label = np.delete(fold_train_label, idx_to_del)
+                        label_count = np.sum(fold_train_label == label)
+
+            assert len(set(fold_val_index) & set(fold_train_index)) == 0, \
+                'Validation set must be independant from test set'
+
+            train_dataset = dataset_cls(
+                self.inputs, fold_train_index,
+                labels=self.labels, outputs=self.outputs,
+                features_to_add=self.features_to_add,
+                add_input=self.add_input,
+                in_features_transforms=in_features_transforms,
+                input_transforms=self.data_augmentation+self.input_transforms,
+                output_transforms=self.data_augmentation+self.output_transforms,
+                label_transforms=self.labels_transforms,
+                self_supervision=self.self_supervision,
+                patch_size=patch_size, input_size=input_size,
+                concat_datasets=(self.inputs is not None),
+                device=device)
+            val_dataset = dataset_cls(
+                self.inputs, fold_val_index,
+                labels=self.labels, outputs=self.outputs,
+                features_to_add=self.features_to_add,
+                add_input=self.add_input,
+                in_features_transforms=in_features_transforms,
                 input_transforms=self.input_transforms,
                 output_transforms=self.output_transforms,
-                label_mapping=label_mapping,
-                patch_size=patch_size)
+                label_transforms=self.labels_transforms,
+                self_supervision=self.self_supervision,
+                patch_size=patch_size, input_size=input_size,
+                concat_datasets=(self.inputs is not None),
+                device=device
+            )
             self.dataset["train"].append(train_dataset)
             self.dataset["validation"].append(val_dataset)
 
-    @classmethod
-    def from_numpy(cls, test_inputs=None, test_outputs=None, test_labels=None,
-                   train_inputs=None, train_outputs=None, train_labels=None,
-                   validation_inputs=None, validation_outputs=None,
-                   validation_labels=None, batch_size=1, input_transforms=None,
-                   output_transforms=None, data_augmentation_transforms=None,
-                   add_input=False, label_mapping=None, patch_size=None,
-                   continuous_labels=False):
-        """ Create a data manger from numpy arrays.
+    @staticmethod
+    def discretize_continous_label(labels, verbose=False):
+        # Get an estimation of the best bin edges. 'Sturges' is conservative for pretty large datasets (N>1000).
+        bin_edges = np.histogram_bin_edges(labels, bins='sturges')
+        if verbose:
+            print('Global histogram:\n', np.histogram(labels, bins=bin_edges, density=False), flush=True)
+        # Discretizes the values according to these bins
+        discretization = np.digitize(labels, bin_edges[1:], right=True)
+        if verbose:
+            print('Bin Counts after discretization:\n', np.bincount(discretization), flush=True)
+        return discretization
 
-        Parameters
-        ----------
-        *_inputs, *_outputs, *_labels: ndarrays
-            the training data.
-        batch_size: int, default 1
-            the size of each mini-batch.
-        input_transforms, output_transforms: list of callable, default None
-            transforms a list of samples with pre-defined transformations.
-        data_augmentation_transforms: list of callable, default None
-            transforms the training dataset input with pre-defined
-            transformations on the fly during the training.
-        add_input: bool, default False
-            if true concatenate the input tensor to the output tensor.
-        label_mapping: dict, default None
-            a mapping that can be used to convert labels to be predicted
-            (string to int conversion).
-        patch_size: tuple, default None
-            the size of the patches that will be extracted from the
-            input/output images.
-        continuous_labels: bool, default False
-            if set consider labels as continuous values; ie. floats otherwise
-            a discrete values, ie. integer.
-
-        Returns
-        -------
-        ins: DataManager
-            a data manager.
-        """
-        dataset = dict((key, None) for key in ("train", "test", "validation"))
-        input_transforms = input_transforms or []
-        output_transforms = output_transforms or []
-        data_augmentation_transforms = data_augmentation_transforms or []
-        if test_inputs is not None:
-            test_dataset = ArrayDataset(
-                inputs=test_inputs, indices=range(len(test_inputs)),
-                labels=test_labels, outputs=test_outputs,
-                input_transforms=input_transforms,
-                output_transforms=output_transforms,
-                add_input=add_input,
-                label_mapping=label_mapping,
-                patch_size=patch_size)
-            dataset["test"] = test_dataset
-        if train_inputs is not None:
-            train_dataset = ArrayDataset(
-                inputs=train_inputs,
-                indices=range(len(train_inputs)),
-                labels=train_labels,
-                outputs=train_outputs,
-                input_transforms=(input_transforms +
-                                  data_augmentation_transforms),
-                output_transforms=(output_transforms +
-                                   data_augmentation_transforms),
-                add_input=add_input,
-                label_mapping=label_mapping,
-                patch_size=patch_size)
-            dataset["train"] = [train_dataset]
-        if validation_inputs is not None:
-            validation_dataset = ArrayDataset(
-                inputs=validation_inputs,
-                indices=range(len(validation_inputs)),
-                labels=validation_labels,
-                outputs=validation_outputs,
-                input_transforms=input_transforms,
-                output_transforms=output_transforms,
-                add_input=add_input,
-                label_mapping=label_mapping,
-                patch_size=patch_size)
-            dataset["validation"] = [validation_dataset]
-        return cls(input_path=dataset,
-                   metadata_path=None,
-                   sampler="random",
-                   batch_size=batch_size,
-                   number_of_folds=1,
-                   continuous_labels=continuous_labels)
+    @staticmethod
+    def get_indices_from_mask(mask):
+        return np.arange(len(mask))[mask]
 
     def __getitem__(self, item):
         """ Return the requested item.
@@ -363,9 +365,16 @@ class DataManager(object):
             the requested set of data: test, train or validation.
         """
         if item not in ("train", "test", "validation"):
-            raise ValueError(
-                "Unknown set! Must be 'train', 'test' or 'validation'.")
+            raise ValueError("Unknown set! Must be 'train', 'test' or "
+                             "'validation'.")
         return self.dataset[item]
+
+    @staticmethod
+    def get_labels(df, labels, train_indices):
+        train_labels = []
+        for idx in train_indices :
+            train_labels.append(df[labels[0]].iloc[idx])
+        return np.array(train_labels)
 
     def collate_fn(self, list_samples):
         """ After fetching a list of samples using the indices from sampler,
@@ -378,19 +387,17 @@ class DataManager(object):
         """
         data = OrderedDict()
         for key in ("inputs", "outputs", "labels"):
-            if len(list_samples) == 0:
-                data[key] = None
-            elif getattr(list_samples[-1], key) is None:
+            if len(list_samples) == 0 or getattr(list_samples[-1], key) is None:
                 data[key] = None
             else:
-                data[key] = torch.stack([
-                    torch.as_tensor(getattr(sample, key))
-                    for sample in list_samples], dim=0).float()
+                if key == "inputs" and self.features_to_add is not None:
+                    input_ = torch.stack([torch.as_tensor(getattr(s, key)[0], dtype=torch.float) for s in list_samples], dim=0)
+                    features = torch.stack([torch.as_tensor(getattr(s, key)[1], dtype=torch.float) for s in list_samples], dim=0)
+                    data[key] = ListTensors(input_, features)
+                else:
+                    data[key] = torch.stack([torch.as_tensor(getattr(s, key), dtype=torch.float) for s in list_samples], dim=0)
         if data["labels"] is not None:
-            if self.continuous_labels:
-                data["labels"] = data["labels"].type(torch.FloatTensor)
-            else:
-                data["labels"] = data["labels"].type(torch.LongTensor)
+            data["labels"] = data["labels"].type(torch.FloatTensor)
         return DataItem(**data)
 
     def get_dataloader(self, train=False, validation=False, test=False,
@@ -419,25 +426,15 @@ class DataManager(object):
                 self.dataset["test"], batch_size=self.batch_size,
                 collate_fn=self.collate_fn, **self.data_loader_kwargs)
         if train:
-            # weights is a list of weights per data point in the data set we
-            # are drawing from, NOT a weight per class.
             if self.sampler == "weighted_random":
-                if self.sampler_weights is None:
-                    raise ValueError(
-                        "Weighted random not yet supported with your input "
-                        "parameters.")
                 indices = self.dataset["train"][fold_index].indices
-                samples_weigths = [self.sampler_weights[
-                    self.stratify_labels[idx]] for idx in indices]
-                sampler = WeightedRandomSampler(
-                    samples_weigths, len(indices), replacement=True)
+                samples_weigths = self.sampler_weigths[np.array(self.stratify_label[indices], dtype=np.int32)]
+                sampler = WeightedRandomSampler(samples_weigths, len(indices), replacement=True)
             elif self.sampler == "random":
-                sampler = RandomSampler(
-                    self.dataset["train"][fold_index], replacement=False)
+                sampler = RandomSampler(self.dataset["train"][fold_index])
             _train = DataLoader(
-                self.dataset["train"][fold_index], batch_size=self.batch_size,
-                sampler=sampler, collate_fn=self.collate_fn,
-                **self.data_loader_kwargs)
+                self.dataset["train"][fold_index], batch_size=self.batch_size, sampler=sampler,
+                collate_fn=self.collate_fn, **self.data_loader_kwargs)
         if validation:
             _validation = DataLoader(
                 self.dataset["validation"][fold_index],
@@ -446,7 +443,7 @@ class DataManager(object):
         return SetItem(test=_test, train=_train, validation=_validation)
 
     @staticmethod
-    def get_mask(df, projection_labels=None, sample_size=1):
+    def get_mask(df, projection_labels=None, check_nan=None):
         """ Filter a table.
 
         Parameters
@@ -456,90 +453,144 @@ class DataManager(object):
         projection_labels: dict, default None
             selects only the data that match the conditions in the dict
             {<column_name>: <value>}.
-        sample_size: float, default 1
-            should be between 0.0 and 1.0 and represent the proportion of the
-            dataset used by the manager (random selection that can be usefull
-            during testing).
-
+        check_nan: list of str, default None
+            check if there is nan in the selected columns. Select only the rows without nan
         Returns
         -------
-        mask: a list of boolean values.
+        mask: a list of boolean values
         """
-        mask = np.random.choice(2, len(df), p=[1 - sample_size, sample_size])
-        mask = mask.astype(np.bool)
-        if projection_labels is None:
-            return mask
-        for (col, val) in projection_labels.items():
-            if isinstance(val, list):
-                mask &= getattr(df, col).isin(val)
-            elif val is not None:
-                mask &= getattr(df, col).eq(val)
+
+        mask = np.ones(len(df), dtype=np.bool)
+        if projection_labels is not None:
+            for (col, val) in projection_labels.items():
+                if isinstance(val, list):
+                    mask &= getattr(df, col).isin(val)
+                elif val is not None:
+                    mask &= getattr(df, col).eq(val)
+        if check_nan is not None:
+            for col in check_nan:
+                mask &= ~getattr(df, col).isna()
         return mask
 
-    @staticmethod
-    def get_mask_indices(mask):
-        """ From an input mask vector, return the true indices.
-        """
-        return np.arange(len(mask))[mask]
 
+    def dump_augmented_data(self, N_per_class, output_path, output_path_df):
+        ## It takes all the dataset and computes, for each class sample, transformations that preserve the class
+        #  distribution as homogeneously as possible
+        def apply_transforms(obj, tfs):
+            obj_tf = obj
+            for tf in tfs:
+                obj_tf = tf(obj)
+            return obj_tf
+
+        # First, get the mask to consider only relevant data for our application
+        df = pd.read_csv(self.metadata_path, sep="\t")
+        mask = DataManager.get_mask(df=df, projection_labels=self.projection_labels)
+
+        labels_mapping = {l: apply_transforms(l, self.labels_transforms) for l in set(self.labels[mask])}
+
+        class_repartition = [0 for _ in range(len(set(labels_mapping.values())))] # len == nb of classes
+        for i, label in enumerate(self.labels[mask]):
+            label = labels_mapping[label]
+            class_repartition[label] += 1
+
+        n_classes = len(class_repartition)
+        if isinstance(N_per_class, int):
+            N_per_class = [N_per_class for _ in class_repartition]
+        elif isinstance(N_per_class, list):
+            assert len(N_per_class) == n_classes
+
+        missing_samples_per_class = [N_per_class[i] for i in range(n_classes)]
+        adding_samples_per_class = [(missing_samples_per_class[i]-1)//class_repartition[i] + 1
+                                    if missing_samples_per_class[i] > 0 else 0 for i in range(n_classes)]
+
+        len_X_augmented = np.sum(missing_samples_per_class)
+
+        X_to_dump = np.memmap(output_path, dtype='float32', mode='w+', shape=(len_X_augmented,)+self.inputs[0].shape)
+        df_to_dump = np.zeros(shape=(len_X_augmented, len(df.columns)), dtype=object)
+        # For each class, add the missing samples with the data_augmentation_transforms
+        count = 0
+        pbar = tqdm(total=np.sum(mask), desc="Input images processed")
+        for i in DataManager.get_indices_from_mask(mask):
+            pbar.update()
+            sample = self.inputs[i]
+            label = labels_mapping[self.labels[i]]
+            if missing_samples_per_class[label] > 0:
+                for j in range(adding_samples_per_class[label]):
+                    if missing_samples_per_class[label] > 0:
+                        x_transformed = sample
+                        for tf in self.data_augmentation:
+                            x_transformed = tf(x_transformed)
+                        X_to_dump[count] = x_transformed
+                        df_to_dump[count] = df.values[i]
+                        count += 1
+                        missing_samples_per_class[label] -= 1
+
+        df_to_dump = pd.DataFrame(df_to_dump, columns=df.columns)
+        df_to_dump.to_csv(output_path_df, index=False, sep='\t')
 
 class ArrayDataset(Dataset):
     """ A dataset based on numpy array.
     """
-    def __init__(self, inputs, indices, labels=None, outputs=None,
-                 add_input=False, input_transforms=None,
-                 output_transforms=None, label_mapping=None,
-                 patch_size=None):
+    def __init__(self, inputs, indices, labels=None, outputs=None, features_to_add=None,
+                 add_input=False, in_features_transforms=None,
+                 input_transforms=None, output_transforms=None,
+                 label_transforms=None, self_supervision=None,
+                 patch_size=None, input_size=None, concat_datasets=False, device='cpu'):
         """ Initialize the class.
 
         Parameters
         ----------
-        inputs: numpy array
+        inputs: numpy array or list of numpy array
             the input data.
         indices: iterable of int
             the list of indices that is considered in this dataset.
-        outputs: numpy array
+        labels: DataFrame or numpy array
+        features_to_add: list of pd.Series
+            list of features to add to each input
+        outputs: numpy array or list of numpy array
             the output data.
         add_input: bool, default False
             if set concatenate the input data to the output (useful with
             auto-encoder).
-        input_transforms, output_transforms: list of callable, default None
-            transforms a list of samples with pre-defined transformations.
-        label_mapping: dict, default None
-            a mapping that can be used to convert labels to be predicted
-            (string to int conversion).
+        self_supervision: callable, default None
+            if set, the transformation to apply to each input that will generate a label
         patch_size: tuple, default None
-            the size of the patches that will be extracted from the
-            input/output images.
+            if set, return only patches of the input image
+        concat_datasets: bool, default False
+            whether to consider a list of inputs/outputs as a list of multiple datasets or a unique dataset
         """
-        # Checks
-        if labels is not None:
-            assert len(inputs) == len(labels)
-        if outputs is not None:
-            assert len(inputs) == len(outputs)
 
-        # Class parameters
         self.inputs = inputs
         self.labels = labels
         self.outputs = outputs
+        self.device = device
         self.indices = indices
+        self.concat_datasets = concat_datasets
         self.add_input = add_input
+        self.patch_size = patch_size
+        self.input_size = input_size
+        self.features_to_add = features_to_add
+        if self.patch_size is not None:
+            assert np.array(self.patch_size).shape == np.array(self.input_size).shape
+            self.nb_patches_by_img = np.product(np.array(self.input_size) // np.array(self.patch_size))
+            self.input_cached, self.output_cached, self.label_cached, self.input_indx_cached = None, None, None, None
+        self.in_features_transforms = in_features_transforms or []
         self.input_transforms = input_transforms or []
         self.output_transforms = output_transforms or []
-        self.label_mapping = label_mapping
-        self.patch_size = patch_size
-        self.input_size = np.asarray(self.inputs.shape[2:])
-        if self.patch_size is not None:
-            self.patch_size = np.asarray(self.patch_size)
-            logger.debug("Patch size: {0}".format(self.patch_size))
-            logger.debug("Input size: {0}".format(self.input_size))
-            assert self.patch_size.shape == self.input_size.shape
-            self.patch_grid = self.input_size // self.patch_size
-            logger.debug("Patch grid: {0}".format(self.patch_grid))
-            self.nb_patches_by_img = np.prod(self.patch_grid)
-            logger.debug("Number patches: {0}".format(self.nb_patches_by_img))
-            (self.input_cached, self.output_cached, self.label_cached,
-             self.image_idx_cached) = (None, None, None, None)
+        self.labels_transforms = label_transforms or []
+        self.self_supervision = self_supervision
+        self.output_same_as_input = (self.add_input and self.outputs is None)
+        if self.add_input and self.outputs is None:
+            self.outputs = self.inputs
+            self.add_input = False
+        if self.concat_datasets:
+            self.cumulative_sizes = np.cumsum([len(inp) for inp in self.inputs])
+
+        if self.labels is not None and self.inputs is not None:
+            assert (self.concat_datasets and self.cumulative_sizes[-1] == len(self.labels)) or \
+                   len(self.inputs) == len(self.labels)
+        if self.outputs is not None and self.inputs is not None:
+            assert len(self.inputs) == len(self.outputs)
 
     def __getitem__(self, item):
         """ Return the requested item.
@@ -549,96 +600,83 @@ class ArrayDataset(Dataset):
         item: namedtuple
             a named tuple containing 'inputs', 'outputs', and 'labels' data.
         """
-        logger.debug("Asked item: {0}".format(item))
         if isinstance(item, int):
             concat_axis = 0
         else:
             concat_axis = 1
 
-        # If the patches are already loaded just select the requested patch
         if self.patch_size is not None:
-            patch_idx = item % self.nb_patches_by_img
-            image_idx = item // self.nb_patches_by_img
-            indices = self.indices[image_idx]
-            if self.image_idx_cached == image_idx:
+            offset = item % self.nb_patches_by_img
+            item = item // self.nb_patches_by_img
+            if self.input_indx_cached == item:
                 # Retrieve directly the input (and eventually the output)
-                idx = tuple(np.unravel_index(patch_idx, self.patch_grid))
-                logger.debug("Getting patch index item: {0}".format(idx))
-                _inputs = self.input_cached[idx]
-                if self.output_cached is not None:
-                    _outputs = self.output_cached[idx]
-                else:
-                    _outputs = None
-                _labels = self.label_cached
-                return DataItem(inputs=_inputs, outputs=_outputs,
-                                labels=_labels)
-        else:
-            indices = self.indices[item]
+                indx = np.unravel_index(offset, np.array(self.input_size) // np.array(self.patch_size))
+                _inputs = self.input_cached[indx]
+                _outputs, _labels = self.output_cached, self.label_cached
+                if self.output_same_as_input:
+                    _outputs = self.output_cached[indx]
+                return DataItem(inputs=_inputs, outputs=_outputs, labels=_labels)
 
-        # Load the requested data
-        logger.debug("Precomputed indices: {0}".format(indices))
-        _inputs = self.inputs[indices]
-        _labels, _outputs = (None, None)
-        if self.labels is not None:
-            _labels = self.labels[indices]
-        if self.outputs is not None:
-            _outputs = self.outputs[indices]
+        idx = self.indices[item]
+        _outputs = None
+        if self.concat_datasets:
+            dataset_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+            sample_idx = idx - self.cumulative_sizes[dataset_idx-1] if dataset_idx > 0 else idx
+            _inputs = self.inputs[dataset_idx][sample_idx]
+            if self.outputs is not None:
+                _outputs = self.outputs[dataset_idx][sample_idx]
+        else:
+            _inputs = self.inputs[idx]
+            if self.outputs is not None:
+                _outputs = self.outputs[idx]
+
+        if self.outputs is not None and self.add_input:
+            _outputs = np.concatenate((_outputs, _inputs), axis=concat_axis)
+
+        _labels = None
+        if self.labels is not None: # Particular case in which we can deal with strings before transformations...
+            _labels = self.labels[idx]
 
         # Apply the transformations to the data
-        seed = random.getrandbits(30)
         for tf in self.input_transforms:
-            if hasattr(tf, "seed"):
-                tf.seed = seed
-            if hasattr(tf, "dtype"):
-                tf.dtype = "input"
             _inputs = tf(_inputs)
         if _outputs is not None:
             for tf in self.output_transforms:
-                if hasattr(tf, "seed"):
-                    tf.seed = seed
-                if hasattr(tf, "dtype"):
-                    tf.dtype = "output"
                 _outputs = tf(_outputs)
-        if _labels is not None and self.label_mapping is not None:
-            _labels = [label_mapping[item] for item in _labels]
+        if _labels is not None:
+            for tf in self.labels_transforms:
+                _labels = tf(_labels)
 
-        # Cache data patches and select the requested patch
+        if self.self_supervision is not None:
+            _inputs, _labels = self.self_supervision(_inputs)
+
+        # Eventually, get only one patch of the input (and one patch of the corresponding output if add_input==True)
         if self.patch_size is not None:
-            self.image_idx_cached = image_idx
-            idx = tuple(np.unravel_index(patch_idx, self.patch_grid))
-            logger.debug("Getting patch index item: {0}".format(idx))
-            logger.debug("Splitting input: {0}".format(_inputs.shape))
-            self.input_cached = ArrayDataset._create_patches(
-                _inputs, self.patch_size)
-            logger.debug("Cached: {0}".format(self.input_cached.shape))
-            if _outputs is not None:
-                logger.debug("Splitting output: {0}".format(_outputs.shape))
-                self.output_cached = ArrayDataset._create_patches(
-                    _outputs, self.patch_size)
-                logger.debug("Cached: {0}".format(self.output_cached.shape))
-            self.label_cached = _labels
-            _inputs = self.input_cached[idx]
-            _outputs = self.output_cached[idx]
+            self.input_indx_cached = item
+            from skimage.util.shape import view_as_blocks
+            # from a flat index, convert it to an nd-array index
+            indx = np.unravel_index(offset, np.array(self.input_size) // np.array(self.patch_size))
 
-        # Add input
-        if self.add_input:
-            if _outputs is None:
-                _outputs = _inputs
-            else:
-                _outputs = np.concatenate(
-                    (_outputs, _inputs), axis=concat_axis)
+            # Store everything in a cache to avoid useless computations...
+            self.input_cached = view_as_blocks(_inputs, tuple(self.patch_size))
+            self.output_cached = _outputs
+            if self.output_same_as_input:
+                self.output_cached = _outputs, tuple(self.patch_size)
+            self.label_cached = _labels
+
+            _inputs = self.input_cached[indx]
+            if self.output_same_as_input:
+                _outputs = self.output_cached[indx]
+
+        # Finally, add the other input features, if any
+        if self.features_to_add is not None:
+            _features = self.features_to_add[self.indices[item]]
+            if self.in_features_transforms is not None:
+                for tf in self.in_features_transforms:
+                    _features = tf(_features)
+            _inputs = [_inputs, _features]
 
         return DataItem(inputs=_inputs, outputs=_outputs, labels=_labels)
-
-    @staticmethod
-    def _create_patches(arr, patch_size):
-        channel_idx = len(patch_size)
-        channels_cached = []
-        for channel in arr:
-            channel_patches = view_as_blocks(channel, tuple(patch_size))
-            channel_patches = np.expand_dims(channel_patches, axis=channel_idx)
-            channels_cached.append(channel_patches)
-        return np.concatenate(channels_cached, axis=channel_idx)
 
     def __len__(self):
         """ Return the length of the dataset.
