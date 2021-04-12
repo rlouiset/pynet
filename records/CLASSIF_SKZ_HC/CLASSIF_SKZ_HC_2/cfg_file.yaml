@@ -1,0 +1,109 @@
+## CONFIGURATION FILE FOR CLASSIFICATION XPS SCHIZOPHRENIA - HEALTHY CONTROL
+
+XP_NAME :
+  "CLASSIF_SKZ_HC"
+
+#############################################
+########### DATASET_CONFIG ##################
+#############################################
+DATASET_CONFIG :
+  DATA_DIRS :
+    ROOT : "/home/robin/Desktop/rl264746/neurospin/psy/"
+    metadata_path :
+      - "start-icaar-eugei_cat12vbm_participants.csv"
+      - "bsnip1_cat12vbm_participants.csv"
+      - "schizconnect-vip-prague_cat12vbm_participants.csv"
+    input_path :
+      - "start-icaar-eugei_cat12vbm_rois-gs.csv"
+      - "bsnip1_cat12vbm_rois-gs.csv"
+      - "schizconnect-vip-prague_cat12vbm_rois-gs.csv"
+
+  ## Number of folds / Max sample number per labels / Max train set length
+  N_FOLD : 10
+  N_TRAIN_MAX : 643
+  N_TRAIN_MAX_PER_LABEL : ~
+  TRAIN_SIZE : 0.9
+
+  ## RESIDUALS : Regress out some metadata
+  RESIDUALS :
+    REGRESS_OUT : "site + age + sex"
+    WITH_RESPECT_TO : "site + age + sex + diagnosis"
+
+  ## Features to filter out
+  FEATURES_FILTER :
+    KEYWORDS :
+      - "participant_id"
+      - "run"
+      - "session"
+      - "TIV"
+      - "CSF_Vol"
+      - "GM_Vol"
+      - "WM_Vol"
+    SUB_KEYWORDS :
+      - "CSF_Vol"
+
+  ## Stratification type
+  STRATIFICATION : "CLASSIF_SKZ_HC"
+
+  ## String to Label conversion dict
+  LABEL_DICT:
+    schizophrenia: 1
+    control: 0
+
+
+#############################################
+########### METRICS_CONFIG ##################
+#############################################
+METRICS_CONFIG :
+  ## Define supervised classification metrics
+  CLASSIFICATION :
+      metrics :
+        - 'AUC'
+        - 'BACC'
+        - 'ACC'
+      phase :
+        - 'TEST'
+        - 'VAL'
+      hp :
+        testing_label_mapping :
+          0 : 0
+          1 : 1
+  ## Define unsupervised clustering metrics
+  CLUSTERING :
+      metrics :
+        - 'ClusteringStability'
+      phase :
+        - 'TEST'
+      hp :
+        testing_label_mapping :
+          0 : 0
+          1 : 1
+        label_to_cluster : 1
+
+
+#############################################
+########### ML_METHOD_CONFIG ################
+#############################################
+ML_METHOD_CONFIG :
+  ## Define Dimensionality Reduction method (example : "PCA", "ICA")
+  DR_METHOD : ~
+  ## Define ML Method method (example : "HYDRA", "SVM")
+  ML_METHOD :
+    name : "HYDRA"
+    hyperparameters :
+      C : 0.1
+      n_labels : 2
+      n_consensus : 20
+      n_iterations : 20
+      stability_threshold: 0.8
+      noise_tolerance_threshold: 10
+      initialization: "DPP"
+      clustering : "gaussian_mixture"
+      consensus : "spectral_clustering"
+      negative_weighting: "soft_clustering"
+      n_clusters_per_label :
+        0 : 1
+        1 : 3
+      training_label_mapping :
+        0 : 0
+        1 : 1

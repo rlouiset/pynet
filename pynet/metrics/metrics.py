@@ -24,6 +24,7 @@ from pynet.utils import Metrics
 logger = logging.getLogger("pynet")
 
 
+
 @Metrics.register
 def accuracy(y_pred, y):
     y_pred = y_pred.data.max(dim=1)[1]
@@ -80,6 +81,19 @@ def AUC(y, y_pred, multi_class=None) :
     if multi_class is not None :
         return sk_metrics.roc_auc_score(y, y_pred, multi_class=multi_class, average='macro')
     return sk_metrics.roc_auc_score(y, y_pred)
+
+
+METRICS = {
+    "accuracy": accuracy,
+    "balanced_accuracy": balanced_accuracy,
+    "multiclass_dice": multiclass_dice,
+    # cf. scikit doc: " The binary case expects a shape (n_samples,), and the scores
+    # must be the scores of the class with the greater label."
+}
+
+def get_available_metrics() :
+    return METRICS
+
 
 class BinaryClassificationMetrics(object):
     """ Computes and stores the average and current value.
@@ -191,3 +205,4 @@ for name in ("accuracy", "average_precision_score", "cohen_kappa_score",
 
 Metrics.register(SKMetrics("fbeta_score", beta=1), name="f1_score")
 Metrics.register(SKMetrics("fbeta_score", beta=2), name="f2_score")
+

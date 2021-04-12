@@ -1,5 +1,0 @@
-python_network.egg-info/PKG-INFO
-python_network.egg-info/SOURCES.txt
-python_network.egg-info/dependency_links.txt
-python_network.egg-info/requires.txt
-python_network.egg-info/top_level.txt

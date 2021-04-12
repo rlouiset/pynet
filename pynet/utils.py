@@ -143,6 +143,8 @@ def get_tools():
     mod_members = dict(inspect.getmembers(sys.modules[__name__]))
     for key in ["Networks", "Regularizers", "Losses", "Metrics"]:
         tools[key.lower()] = mod_members[key].get_registry()
+        print(key)
+        print(tools[key.lower()])
     return tools
 
 

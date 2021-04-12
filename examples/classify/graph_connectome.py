@@ -19,22 +19,17 @@ import sys
 if "CI_MODE" in os.environ:
     sys.exit()
 import logging
-import shutil
 import pynet
 from pynet.datasets import DataManager, get_fetchers
 from pynet.utils import setup_logging
-from pynet.metrics import SKMetrics
 from pynet.plotting import Board, update_board
 from mne.viz import circular_layout, plot_connectivity_circle
 import collections
 import torch
-import torch.nn as nn
 from torch.optim import lr_scheduler
-import scipy
 from scipy.stats.stats import pearsonr
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import matplotlib.pyplot as plt
 
 setup_logging(level="info")

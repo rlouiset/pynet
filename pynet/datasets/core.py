@@ -50,7 +50,7 @@ class DataManager(object):
                  N_train_max=None,  projection_labels=None, number_of_folds=10, batch_size=1, sampler=None,
                  in_features_transforms=None, input_transforms=None, output_transforms=None, labels_transforms=None,
                  stratify_label_transforms=None, data_augmentation=None, self_supervision=None, add_input=False,
-                 patch_size=None, input_size=None, test_size=0.1, dataset=None, device='cpu', sep=',', N_train_max_per_label=None,
+                 patch_size=None, input_size=None, test_size=0.1, train_size=0.9, dataset=None, device='cpu', sep=',', N_train_max_per_label=None,
                  **dataloader_kwargs):
         """ Splits an input numpy array using memory-mapping into three sets:
         test, train and validation. This function can stratify the data.
@@ -108,6 +108,8 @@ class DataManager(object):
         dataset: Dataset object, default None
             The Dataset used to create the DataLoader. It must be a subclass of <ArrayDataset>
         """
+        self.train_size = train_size
+
         assert input_path is None or type(input_path) == type(metadata_path)
         if output_path is not None:
             assert input_path is None or type(output_path) == type(input_path)
@@ -117,13 +119,16 @@ class DataManager(object):
         output_path = [output_path] if output_path is not None else None
 
         assert input_path is None or len(input_path) == len(metadata_path)
-        self.logger = logging.getLogger("pynet")
+        self.logger = logging.getLogger()
 
         if input_path is not None:
             for (i, m) in zip(input_path, metadata_path):
                 self.logger.info('Correspondance {data} <==> {meta}'.format(data=i, meta=m))
 
-            self.inputs = [np.load(p, mmap_mode='r') for p in input_path]
+            if input_path[0][-4] == '.npy' :
+                self.inputs = [np.load(p, mmap_mode='r') for p in input_path]
+            else :
+                self.inputs = [pd.read_csv(p, sep=sep) for p in input_path]
         else:
             self.inputs = None
 
@@ -131,9 +136,11 @@ class DataManager(object):
             self.outputs = [np.load(p, mmap_mode='r') for p in output_path]
 
         all_df = [pd.read_csv(p, sep=sep) for p in metadata_path]
+
         assert self.inputs is None or np.all([len(i) == len(m) for (i,m) in zip(self.inputs, all_df)])
 
         df = pd.concat(all_df, ignore_index=True, sort=False)
+        self.metadata_df = df
 
         mask = DataManager.get_mask(
             df=df,
@@ -274,7 +281,7 @@ class DataManager(object):
         if N_train_max is not None:
             Splitter = ShuffleSplit if stratify_label is None else StratifiedShuffleSplit
             kfold_splitter = Splitter(n_splits=self.number_of_folds,
-                                      train_size=float(0.92*N_train_max/len(train_indices)), random_state=0)
+                                      train_size=float(self.train_size*N_train_max/len(train_indices)), random_state=0)
             strat_indices = np.array(self.stratify_label[train_indices], dtype=np.int32) \
                 if stratify_label is not None else None
             gen = kfold_splitter.split(dummy_like_X_train, strat_indices)

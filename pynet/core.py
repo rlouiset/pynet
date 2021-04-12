@@ -30,7 +30,7 @@ import numpy as np
 from pynet.utils import checkpoint
 from pynet.history import History
 from pynet.observable import Observable
-from pynet.utils import Metrics
+import pynet.metrics.metrics as mmetrics
 from pynet.utils import reset_weights
 
 
@@ -104,20 +104,13 @@ class Base(Observable):
                                  "'pytorch.nn'.".format(loss_name))
             self.loss = getattr(torch.nn, loss_name)()
         self.metrics = {}
-        for obj_or_name in (metrics or []):
-            if isinstance(obj_or_name, types.FunctionType):
-                self.metrics[obj_or_name.__name__] = obj_or_name
-                continue
-            if hasattr(obj_or_name, "__call__"):
-                self.metrics[obj_or_name.__class__.__name__] = obj_or_name
-                continue
-            if obj_or_name not in Metrics.get_registry():
-                logger.info("Available metrics:\n{0}".format(
-                    Metrics.get_registry()))
+        for name in (metrics or []):
+            METRICS = mmetrics.get_available_metrics()
+            if name not in METRICS:
                 raise ValueError("Metric '{0}' not yet supported: you can try "
-                                 "to fill the 'Metrics' factory, or ask for "
-                                 "some help!".format(obj_or_name))
-            self.metrics[obj_or_name] = Metrics.get_registry()[obj_or_name]
+                                 "to fill the 'METRICS' factory, or ask for "
+                                 "some help!".format(name))
+            self.metrics[name] = METRICS[name]
         if use_cuda and not torch.cuda.is_available():
             raise ValueError("No GPU found: unset 'use_cuda' parameter.")
         self.checkpoint = None
@@ -139,7 +132,7 @@ class Base(Observable):
         self.device = torch.device("cuda" if use_cuda else "cpu")
         self.model = self.model.to(self.device)
 
-    def training(self, manager, nb_epochs, checkpointdir=None, fold_index=None,
+    def training(self, manager, nb_epochs, exp_name="default", checkpointdir=None, fold_index=None,
                  scheduler=None, with_validation=True, save_after_epochs=1,
                  add_labels=False):
         """ Train the model.
@@ -303,7 +296,8 @@ class Base(Observable):
             logger.debug("  targets: {0}".format(len(targets)))
             if hasattr(self.loss, "layer_outputs"):
                 self.loss.layer_outputs = layer_outputs
-            batch_loss = self.loss(outputs, *targets)
+            targets = [target_i.long() for target_i in targets]
+            batch_loss = self.loss(outputs.float(), targets[0])
             regularizations = self.notify_observers(
                 "regularizer", layer_outputs=layer_outputs)
             for reg in regularizations:

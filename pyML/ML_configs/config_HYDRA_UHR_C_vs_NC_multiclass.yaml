@@ -1,0 +1,104 @@
+
+## CONFIGURATION FILE FOR HYDRA XPS [CONTROL] vs [BIPOLAR+SCHIZOPHRENIA]
+
+XP_NAME :
+  "HYDRA_UHR_C_vs_NC_multiclass"
+
+#############################################
+########### DATASET_CONFIG ##################
+#############################################
+DATASET_CONFIG :
+  DATA_DIRS :
+    ROOT : "/home/robin/Desktop/rl264746/neurospin/psy/"
+    metadata_path :
+      - "biobd_cat12vbm_participants.csv"
+      - "bsnip1_cat12vbm_participants.csv"
+      - "schizconnect-vip-prague_cat12vbm_participants.csv"
+      - "start-icaar-eugei_cat12vbm_participants.csv"
+    input_path :
+      - "biobd_cat12vbm_rois-gs.csv"
+      - "bsnip1_cat12vbm_rois-gs.csv"
+      - "schizconnect-vip-prague_cat12vbm_rois-gs.csv"
+      - "start-icaar-eugei_cat12vbm_rois-gs.csv"
+
+  ## Number of folds / Max sample number per labels / Max train set length
+  N_FOLD : 5
+  N_TRAIN_MAX : 742
+  TRAIN_SIZE: 0.8
+  N_TRAIN_MAX_PER_LABEL : ~
+
+  ## RESIDUALS : Regress out some metadata
+  RESIDUALS :
+    REGRESS_OUT : "site + age + sex"
+    WITH_RESPECT_TO : "site + age + sex + diagnosis"
+
+  ## Features to filter out
+  FEATURES_FILTER :
+    KEYWORDS :
+      - "participant_id"
+      - "run"
+      - "session"
+      - "TIV"
+      - "CSF_Vol"
+      - "GM_Vol"
+      - "WM_Vol"
+    SUB_KEYWORDS :
+      - "CSF_Vol"
+
+  ## Stratification type
+  STRATIFICATION : "HYDRA_UHR_C_vs_NC_multiclass"
+
+  ## String to Label conversion dict
+  LABEL_DICT:
+    UHR-NC: 3
+    UHR-C: 2
+    FEP: 1
+    schizophrenia: 1
+    control: 0
+
+
+#############################################
+########### METRICS_CONFIG ##################
+#############################################
+METRICS_CONFIG :
+  ## Define unsupervised classification metrics
+  CLUSTERING :
+      metrics :
+        - "ARI"
+        - "V_measure"
+        - "ClusteringBACC"
+      phase :
+        - 'VAL'
+      hp :
+        testing_label_mapping :
+          2 : 0
+          3 : 1
+        label_to_cluster: 2
+
+
+#############################################
+########### ML_METHOD_CONFIG ################
+#############################################
+ML_METHOD_CONFIG :
+  ## Define Dimensionality Reduction method (example : "PCA", "ICA")
+  DR_METHOD : ~
+  ## Define ML Method method (example : "HYDRA", "SVM")
+  ML_METHOD :
+    name : "UCSL_C"
+    hyperparameters :
+      n_labels : 3
+      n_consensus : 30
+      covariance_type : "full"
+      maximization : "max_margin"
+      initialization : "DPP"
+      clustering : "HYDRA"
+      multiclass_config: "ovr"
+      n_clusters_per_label :
+        0 : 1
+        1 : 1
+        2 : 2
+      training_label_mapping :
+        0 : 0
+        1 : 1
+        2 : 2
+        3 : 2
