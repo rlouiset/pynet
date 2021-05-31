@@ -2,17 +2,17 @@ import argparse
 from train import BaseTrainer
 
 ## root and data directory paths
-ROOT_CONF = {'input_path': "/home/robin/Desktop/rl264746/neurospin/psy_sbox/",
-             'metadata_path': "/home/robin/Desktop/rl264746/neurospin/psy_sbox/"}
+ROOT_CONF = {'input_path': "/tsi/clusterhome/rlouiset/psy",
+             'metadata_path': "/tsi/clusterhome/rlouiset/psy"}
 
 DATA_DIRS = {'input_path': [
-                            ROOT_CONF['input_path']+'/'+'icaar-start_t1mri_mwp1_gs-raw_data64.npy',
+                            #ROOT_CONF['input_path']+'/'+'icaar-start_t1mri_mwp1_gs-raw_data64.npy',
                             ROOT_CONF['input_path']+'/'+'bsnip_t1mri_mwp1_gs-raw_data64.npy',
                             ROOT_CONF['input_path']+'/'+'schizconnect-vip_t1mri_mwp1_gs-raw_data64.npy',
                             ROOT_CONF['input_path']+'/'+'biobd_t1mri_mwp1_gs-raw_data64.npy'
                             ],
              'metadata_path': [
-                            ROOT_CONF['metadata_path']+'/'+'icaar-start_t1mri_mwp1_participants.csv',
+                            #ROOT_CONF['metadata_path']+'/'+'icaar-start_t1mri_mwp1_participants.csv',
                             ROOT_CONF['metadata_path']+'/'+'bsnip_t1mri_mwp1_participants.csv',
                             ROOT_CONF['metadata_path']+'/'+'schizconnect-vip_t1mri_mwp1_participants.csv',
                             ROOT_CONF['metadata_path']+'/'+'biobd_t1mri_mwp1_participants.csv',
@@ -22,7 +22,7 @@ DATA_DIRS = {'input_path': [
 ## define folds, labels cropping in order to equilibrate the dataset
 N_FOLD = 10
 N_TRAIN_MAX = 600
-N_TRAIN_MAX_PER_LABEL = 250
+N_TRAIN_MAX_PER_LABEL = 300
 
 
 CUSTOM_STRATIFICATION_CONF = {
@@ -47,7 +47,7 @@ FEATURES_CONFIG = {'preproc':'cat12', 'N_train_max':N_TRAIN_MAX, 'db':'tiny_scz_
                    'stratify_label':'age', 'nb_folds':N_FOLD, 'metrics':['accuracy'], 'nb_epochs':10}
 
 MODEL_CONFIG = {'pretrained_path':None, 'freeze_until_layer':None, 'dropout':0, 'num_classes':2, 'da':['noise'],
-                'net':'fc', 'batch_size':8, 'pin_mem':False, 'drop_last':True, 'cuda':False, 'num_cpu_workers':4}  # densenet121
+                'net':'densenet121', 'batch_size':8, 'pin_mem':False, 'drop_last':True, 'cuda':False, 'num_cpu_workers':4}  # densenet121
 
 TEST_CONFIG = {'outfile_name':None, 'checkpoint_dir':None, 'nb_epochs_per_saving':5, 'bayesian':False, 'concrete_dropout':0, 'add_input':False}
 OPTIMIZER_CONFIG = {'gamma_scheduler':0.00001, 'step_size_scheduler':1, 'lr':0.0001, 'sampler':'random', 'exp_name':'First try', 'folds':None}
