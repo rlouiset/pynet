@@ -125,8 +125,8 @@ class DataManager(object):
             for (i, m) in zip(input_path, metadata_path):
                 self.logger.info('Correspondance {data} <==> {meta}'.format(data=i, meta=m))
 
-            if input_path[0][-4] == '.npy' :
-                self.inputs = [np.load(p, mmap_mode='r') for p in input_path]
+            if input_path[0][-4:] == '.npy' :
+                self.inputs = [np.load(p, mmap_mode='r+') for p in input_path]
             else :
                 self.inputs = [pd.read_csv(p, sep=sep) for p in input_path]
         else:

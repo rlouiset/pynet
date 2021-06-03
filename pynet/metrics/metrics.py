@@ -14,6 +14,7 @@ Define common metrics.
 # Third party import
 import logging
 import torch
+import torch.nn as nn
 import numpy as np
 import torch.nn.functional as func
 import sklearn.metrics as sk_metrics
@@ -23,14 +24,13 @@ from pynet.utils import Metrics
 # Global parameters
 logger = logging.getLogger("pynet")
 
-
-
 @Metrics.register
 def accuracy(y_pred, y):
-    y_pred = y_pred.data.max(dim=1)[1]
+    y_pred = nn.Sigmoid()(y_pred)
+    y_pred = (y_pred>0.5).int()
+    #y_pred = y_pred.data.max(dim=1)[1]
     accuracy = y_pred.eq(y).sum().cpu().numpy() / y.size()[0]
     return accuracy
-
 
 def _dice(y_pred, y):
     """ Binary dice indice adapted to pytorch tensors.

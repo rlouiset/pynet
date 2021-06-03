@@ -296,7 +296,7 @@ class Base(Observable):
             logger.debug("  targets: {0}".format(len(targets)))
             if hasattr(self.loss, "layer_outputs"):
                 self.loss.layer_outputs = layer_outputs
-            targets = [target_i.long() for target_i in targets]
+            targets = [target_i.float() for target_i in targets]
             batch_loss = self.loss(outputs.float(), targets[0])
             regularizations = self.notify_observers(
                 "regularizer", layer_outputs=layer_outputs)
