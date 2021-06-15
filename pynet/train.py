@@ -124,7 +124,7 @@ class BaseTrainer():
                                         HardNormalization()]
                 else:
                     input_transforms = [Crop((1, 121, 128, 121)), Padding([1, 128, 128, 128], mode='constant'), Normalize()]
-            elif args.preproc == 'quasi_raw': # Size [122 x 146 x 122], 1.5mm³
+            elif args.preproc == 'quasi_raw': # Size [122 x 146 x 122], 1.5mm
                 if args.net == "alpha_wgan":
                     input_transforms = [Crop((1, 121, 128, 121)), Padding([1, 128, 128, 128], mode='constant'),
                                         HardNormalization()]

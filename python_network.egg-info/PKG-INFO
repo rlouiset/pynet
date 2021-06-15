@@ -1,9 +1,7 @@
 Metadata-Version: 1.1
 Name: python-network
 Version: 0.0.0
-Summary: 
-Helper Module for Deep Learning.
-
+Summary:  Helper Module for Deep Learning. 
 Home-page: https://github.com/neurospin/pynet
 Author: 
 pynet developers
